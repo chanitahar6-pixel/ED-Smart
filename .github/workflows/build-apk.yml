@@ -1,0 +1,173 @@
+name: Build NightRunner APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.3"
+  GAME_ZIP: "NightRunner_Game.zip"
+  PROJECT_DIR: "NightRunner_Game"
+  EXPORT_PRESET: "Android"
+  APK_OUTPUT: "build/NightRunner.apk"
+  KS_FILE: "nightrunner.keystore"
+  KS_ALIAS: "nightrunner"
+  KS_PASS: "nightrunner123"
+
+jobs:
+  build-apk:
+    name: "Build NightRunner APK"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      - name: "Extract Game Project"
+        shell: bash
+        run: |
+          set -e
+          unzip -q "${{ env.GAME_ZIP }}" -d .
+          test -d "${{ env.PROJECT_DIR }}"
+          test -f "${{ env.PROJECT_DIR }}/project.godot"
+          echo "Game project: ${{ env.PROJECT_DIR }}"
+
+      - name: "Setup Java 17"
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: "Setup Android SDK"
+        uses: android-actions/setup-android@v3
+
+      - name: "Install Android Components"
+        shell: bash
+        run: |
+          set -e
+          sdkmanager --install             "platform-tools"             "platforms;android-34"             "build-tools;34.0.0"             "cmdline-tools;latest"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          echo "Android SDK: $ANDROID_SDK_ROOT"
+
+      - name: "Download Godot"
+        shell: bash
+        run: |
+          set -e
+          BASE="https://github.com/godotengine/godot/releases/download"
+          FILE="Godot_v${{ env.GODOT_VERSION }}-stable_linux.x86_64"
+          URL="${BASE}/${{ env.GODOT_VERSION }}-stable/${FILE}.zip"
+
+          wget -q --show-progress "$URL" -O godot.zip
+          unzip -q godot.zip
+          test -f "$FILE"
+          chmod +x "$FILE"
+          sudo install -m 0755 "$FILE" /usr/local/bin/godot
+
+          godot --version
+
+      - name: "Install Godot Android Export Templates"
+        shell: bash
+        run: |
+          set -e
+          BASE="https://github.com/godotengine/godot/releases/download"
+          TPZ="Godot_v${{ env.GODOT_VERSION }}-stable_export_templates.tpz"
+          URL="${BASE}/${{ env.GODOT_VERSION }}-stable/${TPZ}"
+          ROOT="$HOME/.local/share/godot/export_templates"
+          DIR="$ROOT/${{ env.GODOT_VERSION }}.stable"
+
+          rm -rf "$DIR" templates_tmp
+          mkdir -p "$DIR" templates_tmp
+
+          wget -q --show-progress "$URL" -O templates.tpz
+          unzip -q templates.tpz -d templates_tmp
+
+          test -d "templates_tmp/templates"
+          cp -a templates_tmp/templates/. "$DIR/"
+
+          test -d "$DIR"
+          find "$DIR" -maxdepth 2 -type f | head -30
+
+      - name: "Configure Godot Android Settings"
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/java_sdk_path = "${JAVA_HOME}"
+          export/android/sdk_path = "${ANDROID_SDK_ROOT}"
+          export/android/debug_keystore = ""
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          EOF
+
+      - name: "Generate Keystore"
+        shell: bash
+        run: |
+          set -e
+          cd "${{ env.PROJECT_DIR }}"
+
+          rm -f "${{ env.KS_FILE }}"
+
+          keytool -genkeypair             -v             -keystore "${{ env.KS_FILE }}"             -alias "${{ env.KS_ALIAS }}"             -keyalg RSA             -keysize 2048             -validity 10000             -dname "CN=NightRunner, OU=Games, O=Dev, L=City, S=State, C=US"             -storepass "${{ env.KS_PASS }}"             -keypass "${{ env.KS_PASS }}"             -noprompt
+
+          test -f "${{ env.KS_FILE }}"
+
+      - name: "Import Godot Project"
+        shell: bash
+        run: |
+          set -e
+          cd "${{ env.PROJECT_DIR }}"
+
+          godot             --headless             --editor             --quit             --path .             --import
+
+      - name: "Verify Android Export Preset"
+        shell: bash
+        run: |
+          set -e
+          cd "${{ env.PROJECT_DIR }}"
+
+          test -f project.godot
+          test -f export_presets.cfg
+          grep -q 'name="Android"' export_presets.cfg
+          grep -q 'platform="Android"' export_presets.cfg
+          echo "Android export preset verified."
+
+      - name: "Build APK"
+        shell: bash
+        run: |
+          set -e
+          cd "${{ env.PROJECT_DIR }}"
+          mkdir -p build
+
+          godot             --headless             --path .             --export-release "${{ env.EXPORT_PRESET }}"             "${{ env.APK_OUTPUT }}"
+
+          test -f "${{ env.APK_OUTPUT }}"
+          ls -lh "${{ env.APK_OUTPUT }}"
+
+      - name: "Upload APK"
+        uses: actions/upload-artifact@v4
+        with:
+          name: NightRunner-APK
+          path: "${{ env.PROJECT_DIR }}/${{ env.APK_OUTPUT }}"
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: "Build Summary"
+        shell: bash
+        run: |
+          set -e
+          SIZE=$(du -sh "${{ env.PROJECT_DIR }}/${{ env.APK_OUTPUT }}" | cut -f1)
+
+          {
+            echo "## NightRunner Build Complete"
+            echo
+            echo "| Variable | Value |"
+            echo "|---|---|"
+            echo "| Godot | ${{ env.GODOT_VERSION }} |"
+            echo "| Android SDK | $ANDROID_SDK_ROOT |"
+            echo "| APK Size | $SIZE |"
+          } >> "$GITHUB_STEP_SUMMARY"
